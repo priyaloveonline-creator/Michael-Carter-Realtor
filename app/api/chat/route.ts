@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { buildRealtorKnowledgeContext, realtor } from "@/data/realtor";
+import { appendRowToSheet } from "@/lib/googleSheets";
 
 export const runtime = "nodejs";
 
@@ -27,9 +28,67 @@ Rules you must always follow:
 7. Do not discuss anything unrelated to real estate, ${realtor.name}'s services, or his listings.
 8. If a visitor sends a photo, describe what you actually see in it, then compare it against the CURRENT LISTINGS above where relevant (e.g. if they ask "is this available"). Only say a photo matches a specific listing if the visual details genuinely line up — never guess or assume a match just because the visitor implies one.
 
+LEAD CAPTURE
+When you have collected at least a name AND (an email or a phone number) from the visitor over the course of the conversation, AND there is genuine buy/sell/rent/invest intent, append a hidden lead record to the very end of your reply, after all the normal visible text, in exactly this format on its own line:
+
+[[LEAD]]{"name":"...","email":"...","phone":"...","intent":"...","area":"...","budget":"...","timeline":"...","summary":"..."}[[/LEAD]]
+
+Rules for this block:
+- Only emit it ONCE per conversation, the first time you have name + (email or phone). Do not repeat it in later replies even if you learn more details.
+- Use "" (empty string) for any field you don't have — never invent a value.
+- "summary" should be one short sentence capturing what they're looking for, in your own words.
+- This block is never shown to the visitor and must not be mentioned or referenced in your visible reply — it is a silent system record only. Write your normal conversational reply first exactly as you otherwise would, then add this block after it.
+- Do not emit this block just because someone gives their name alone, or just browses listings — only when there's real intent plus enough contact info to follow up.
+
 REALTOR KNOWLEDGE
 ${knowledge}
 `;
+}
+
+interface ParsedLead {
+  name: string;
+  email: string;
+  phone: string;
+  intent: string;
+  area: string;
+  budget: string;
+  timeline: string;
+  summary: string;
+}
+
+/**
+ * Extracts a hidden [[LEAD]]{...}[[/LEAD]] block the model may append to its
+ * reply, and returns the visible text with that block stripped out. The
+ * visitor never sees the marker or the raw JSON — only the server does.
+ */
+function extractLead(reply: string): { visibleText: string; lead: ParsedLead | null } {
+  const match = reply.match(/\[\[LEAD\]\]([\s\S]*?)\[\[\/LEAD\]\]/);
+
+  if (!match) {
+    return { visibleText: reply.trim(), lead: null };
+  }
+
+  const visibleText = reply.slice(0, match.index).trim();
+
+  let lead: ParsedLead | null = null;
+  try {
+    const parsed = JSON.parse(match[1]);
+    lead = {
+      name: String(parsed.name ?? ""),
+      email: String(parsed.email ?? ""),
+      phone: String(parsed.phone ?? ""),
+      intent: String(parsed.intent ?? ""),
+      area: String(parsed.area ?? ""),
+      budget: String(parsed.budget ?? ""),
+      timeline: String(parsed.timeline ?? ""),
+      summary: String(parsed.summary ?? ""),
+    };
+  } catch (err) {
+    console.error("Failed to parse lead block:", err);
+    lead = null;
+  }
+
+  return { visibleText, lead };
 }
 
 export async function POST(req: NextRequest) {
@@ -114,7 +173,26 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    return NextResponse.json({ reply });
+    const { visibleText, lead } = extractLead(reply);
+
+    // Fire-and-forget: don't let a slow/failed Sheets write delay or break
+    // the chat response the visitor is waiting on.
+    if (lead && (lead.name || lead.email || lead.phone)) {
+      const timestamp = new Date().toISOString();
+      appendRowToSheet([
+        timestamp,
+        lead.name,
+        lead.email,
+        lead.phone,
+        lead.intent,
+        lead.area,
+        lead.budget,
+        lead.timeline,
+        lead.summary,
+      ]).catch((err) => console.error("Lead sheet sync failed:", err));
+    }
+
+    return NextResponse.json({ reply: visibleText });
   } catch (err) {
     console.error("Chat route error:", err);
     return NextResponse.json(
