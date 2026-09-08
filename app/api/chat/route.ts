@@ -63,7 +63,7 @@ export async function POST(req: NextRequest) {
           "Content-Type": "application/json",
           // Optional but recommended by OpenRouter for attribution/rate-limit tiers.
           "HTTP-Referer": process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000",
-          "X-Title": `${realtor.name} — AI Realtor Assistant`,
+          "X-Title": `${realtor.name} - AI Realtor Assistant`,
         },
         body: JSON.stringify({
           model,
