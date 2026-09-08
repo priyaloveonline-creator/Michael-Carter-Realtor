@@ -7,7 +7,7 @@ import MessageBubble from "@/components/chat/MessageBubble";
 import TypingIndicator from "@/components/chat/TypingIndicator";
 import QuickReplies from "@/components/chat/QuickReplies";
 import FeaturedProperties from "@/components/chat/FeaturedProperties";
-import Composer from "@/components/chat/Composer";
+import Composer, { type ComposerAttachment } from "@/components/chat/Composer";
 import BookingModal from "@/components/BookingModal";
 import { useChat } from "@/lib/useChat";
 import { getAvailableListings } from "@/data/realtor";
@@ -39,12 +39,24 @@ function ChatPageInner() {
     });
   }, [messages, isTyping, showPropertyTypes, showFeatured]);
 
-  async function handleSend(text: string, attachment?: { name: string; type: string }) {
-    const finalText = attachment
-      ? `${text ? text + "\n" : ""}📎 Attached: ${attachment.name}`
-      : text;
+  async function handleSend(text: string, attachment?: ComposerAttachment) {
     setShowPropertyTypes(false);
-    await sendMessage(finalText);
+
+    if (attachment?.dataUrl) {
+      // Real image: send it to the AI as actual image data, not just a filename.
+      await sendMessage(text, attachment.dataUrl);
+      return;
+    }
+
+    if (attachment) {
+      // Non-image file (PDF, docx, etc.) — the model can't see its contents,
+      // so be upfront about that instead of silently pretending to read it.
+      const finalText = `${text ? text + "\n" : ""}📎 Attached: ${attachment.name} (I can't open non-image files yet — happy to answer questions about it if you describe what's in it, or I can connect you with Michael directly.)`;
+      await sendMessage(finalText);
+      return;
+    }
+
+    await sendMessage(text);
   }
 
   function handlePropertyType(type: string) {
