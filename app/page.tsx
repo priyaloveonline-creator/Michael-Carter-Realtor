@@ -71,29 +71,6 @@ export default function ProfilePage() {
         </p>
       </div>
 
-      {/* Skyline banner */}
-      <div className="mx-5 mt-6 relative h-40 rounded-3xl overflow-hidden">
-        <Image
-          src="/images/nyc-skyline.svg"
-          alt="New York City skyline"
-          fill
-          sizes="100vw"
-          className="object-cover"
-        />
-        <div className="absolute inset-0 bg-gradient-to-t from-navy/60 via-navy/10 to-transparent" />
-        <div className="absolute inset-0 flex items-end justify-between p-4">
-          <p className="font-script italic text-white text-2xl leading-tight drop-shadow">
-            Your Next Chapter
-            <br />
-            Starts Here
-          </p>
-          <span className="flex items-center gap-1 bg-white/95 text-navy text-xs font-semibold px-3 py-1.5 rounded-full">
-            <MapPin size={12} className="text-brand-red" />
-            {realtor.location}
-          </span>
-        </div>
-      </div>
-
       {/* Sticky chat CTA */}
       <div className="fixed bottom-0 left-0 right-0 px-5 pb-5 pt-3 bg-gradient-to-t from-white via-white/95 to-transparent">
         <Link
