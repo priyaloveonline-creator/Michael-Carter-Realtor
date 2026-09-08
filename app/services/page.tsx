@@ -31,7 +31,7 @@ export default function ServicesPage() {
         </div>
         <div className="relative h-28 w-28 shrink-0 rounded-full overflow-hidden">
           <Image
-            src="/images/services-hero.svg"
+            src="/images/services-hero.jpg"
             alt="Featured property"
             fill
             sizes="112px"
