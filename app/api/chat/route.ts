@@ -3,9 +3,13 @@ import { buildRealtorKnowledgeContext, realtor } from "@/data/realtor";
 
 export const runtime = "nodejs";
 
+type ContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
 interface ChatMessage {
   role: "user" | "assistant";
-  content: string;
+  content: string | ContentBlock[];
 }
 
 function buildSystemPrompt(): string {
@@ -21,6 +25,7 @@ Rules you must always follow:
 5. When a visitor shows genuine buying/selling/renting/investing intent, naturally ask for their name and either an email or phone number so ${realtor.name} can follow up — but don't demand this in the first message, and never ask for all of it at once.
 6. If a visitor wants to schedule a showing or meeting, tell them to use the "Book a Showing" option, since real availability is handled there — do not invent appointment times yourself.
 7. Do not discuss anything unrelated to real estate, ${realtor.name}'s services, or his listings.
+8. If a visitor sends a photo, describe what you actually see in it, then compare it against the CURRENT LISTINGS above where relevant (e.g. if they ask "is this available"). Only say a photo matches a specific listing if the visual details genuinely line up — never guess or assume a match just because the visitor implies one.
 
 REALTOR KNOWLEDGE
 ${knowledge}
@@ -38,6 +43,20 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         { error: "No messages provided." },
         { status: 400 }
+      );
+    }
+
+    // Guard against oversized image uploads hitting the serverless body
+    // limit (Vercel's default is 4.5MB on Hobby). Base64 inflates raw
+    // bytes by ~33%, so keep a comfortable margin.
+    const approxSize = JSON.stringify(messages).length;
+    if (approxSize > 4_000_000) {
+      return NextResponse.json(
+        {
+          error:
+            "That image is too large to send. Please try a smaller photo (under ~3MB).",
+        },
+        { status: 413 }
       );
     }
 
