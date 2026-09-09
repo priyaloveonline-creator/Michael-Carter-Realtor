@@ -29,8 +29,24 @@ function ChatPageInner() {
     useChat(greeting);
   const [showPropertyTypes, setShowPropertyTypes] = useState(intent === "buy");
   const [showFeatured, setShowFeatured] = useState(false);
-  const [bookingOpen, setBookingOpen] = useState(intent === "showing");
+  const [bookingOpen, setBookingOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Auto-open the booking modal once per browser session when arriving via
+  // ?intent=showing (e.g. the "Book a Showing" menu link) — but only the
+  // very first time, not every time the visitor navigates back to /chat
+  // while that query param still happens to be in the URL (browser back
+  // button preserves it, which would otherwise pop the modal open again
+  // unprompted).
+  useEffect(() => {
+    if (intent !== "showing") return;
+    const key = "mc-chat-showing-auto-opened";
+    if (typeof window !== "undefined" && !sessionStorage.getItem(key)) {
+      sessionStorage.setItem(key, "1");
+      setBookingOpen(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({
