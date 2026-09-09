@@ -105,3 +105,115 @@ export async function appendRowToSheet(row: (string | number)[]): Promise<boolea
 
   return true;
 }
+
+/**
+ * Writes a row keyed by a stable conversationId: if a row with that ID
+ * already exists (tracked in the last column), its cells are overwritten in
+ * place; otherwise a new row is appended. This lets a single conversation's
+ * sheet row evolve as the AI learns more over the course of the chat,
+ * instead of creating a new row every time.
+ *
+ * Sheet layout expected: A:Timestamp B:Name C:Email D:Phone E:Intent
+ * F:Area G:Budget H:Timeline I:Summary J:ConversationId (J is a bookkeeping
+ * column — safe to hide/narrow in the Sheet UI, but don't delete it, or
+ * matching breaks and every message will append a new row instead of
+ * updating).
+ */
+export async function upsertLeadRow(
+  conversationId: string,
+  row: {
+    timestamp: string;
+    name: string;
+    email: string;
+    phone: string;
+    intent: string;
+    area: string;
+    budget: string;
+    timeline: string;
+    summary: string;
+  }
+): Promise<boolean> {
+  const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
+  const sheetName = process.env.GOOGLE_SHEETS_SHEET_NAME || "Leads";
+
+  if (!spreadsheetId) {
+    console.warn("GOOGLE_SHEETS_SPREADSHEET_ID not set — skipping sheet sync.");
+    return false;
+  }
+
+  const accessToken = await getAccessToken();
+  if (!accessToken) {
+    console.warn("Google Sheets not configured — skipping sheet sync.");
+    return false;
+  }
+
+  const values = [
+    row.timestamp,
+    row.name,
+    row.email,
+    row.phone,
+    row.intent,
+    row.area,
+    row.budget,
+    row.timeline,
+    row.summary,
+    conversationId,
+  ];
+
+  const authHeader = { Authorization: `Bearer ${accessToken}` };
+
+  // 1. Read the ConversationId column (J) to find an existing row for this
+  //    conversation. Sheets is the source of truth here — no local cache —
+  //    so concurrent visitors never clobber each other's rows.
+  const readRange = encodeURIComponent(`${sheetName}!J:J`);
+  const readUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${readRange}`;
+
+  const readRes = await fetch(readUrl, { headers: authHeader });
+  if (!readRes.ok) {
+    console.error("Google Sheets read failed:", await readRes.text());
+    return false;
+  }
+
+  const readData = await readRes.json();
+  const columnJ: string[][] = readData.values || [];
+  // Row 1 is the header, so data starts at index 1 (sheet row 2).
+  const existingRowIndex = columnJ.findIndex(
+    (cell, idx) => idx > 0 && cell[0] === conversationId
+  );
+
+  if (existingRowIndex > 0) {
+    // Update the existing row in place (sheet rows are 1-indexed).
+    const sheetRowNumber = existingRowIndex + 1;
+    const updateRange = encodeURIComponent(`${sheetName}!A${sheetRowNumber}:J${sheetRowNumber}`);
+    const updateUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${updateRange}?valueInputOption=USER_ENTERED`;
+
+    const updateRes = await fetch(updateUrl, {
+      method: "PUT",
+      headers: { ...authHeader, "Content-Type": "application/json" },
+      body: JSON.stringify({ values: [values] }),
+    });
+
+    if (!updateRes.ok) {
+      console.error("Google Sheets update failed:", await updateRes.text());
+      return false;
+    }
+    return true;
+  }
+
+  // No existing row for this conversation yet — append a new one.
+  const appendRange = encodeURIComponent(`${sheetName}!A1`);
+  const appendUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${appendRange}:append?valueInputOption=USER_ENTERED`;
+
+  const appendRes = await fetch(appendUrl, {
+    method: "POST",
+    headers: { ...authHeader, "Content-Type": "application/json" },
+    body: JSON.stringify({ values: [values] }),
+  });
+
+  if (!appendRes.ok) {
+    console.error("Google Sheets append failed:", await appendRes.text());
+    return false;
+  }
+
+  return true;
+}
