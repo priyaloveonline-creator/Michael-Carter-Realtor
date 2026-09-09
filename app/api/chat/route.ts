@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { buildRealtorKnowledgeContext, realtor } from "@/data/realtor";
-import { appendRowToSheet } from "@/lib/googleSheets";
+import { upsertLeadRow } from "@/lib/googleSheets";
 
 export const runtime = "nodejs";
 
@@ -27,18 +27,22 @@ Rules you must always follow:
 6. If a visitor wants to schedule a showing or meeting, tell them to use the "Book a Showing" option, since real availability is handled there — do not invent appointment times yourself.
 7. Do not discuss anything unrelated to real estate, ${realtor.name}'s services, or his listings.
 8. If a visitor sends a photo, describe what you actually see in it, then compare it against the CURRENT LISTINGS above where relevant (e.g. if they ask "is this available"). Only say a photo matches a specific listing if the visual details genuinely line up — never guess or assume a match just because the visitor implies one.
+9. Write replies in PLAIN TEXT only — no markdown. Do not use **asterisks** for bold, no "#" headers, no markdown bullet/numbered list syntax. If you're listing multiple properties, separate them with line breaks and plain labels (e.g. "Price:", "Beds:") instead of markdown formatting, since the chat display does not render markdown and it will show up as literal asterisks and clutter.
 
 LEAD CAPTURE
-When you have collected at least a name AND (an email or a phone number) from the visitor over the course of the conversation, AND there is genuine buy/sell/rent/invest intent, append a hidden lead record to the very end of your reply, after all the normal visible text, in exactly this format on its own line:
+The visitor's conversation is tracked as a lead record with these fields: Name, Email, Phone, Intent (buy/sell/rent/invest), Area, Budget, Timeline, and a one-sentence Summary.
+
+On EVERY reply where the visitor has shared, or you have learned, ANY new value for ANY of those fields since your last reply — even just one field, even without contact info — append a hidden lead record to the very end of your reply, after all the normal visible text, in exactly this format on its own line:
 
 [[LEAD]]{"name":"...","email":"...","phone":"...","intent":"...","area":"...","budget":"...","timeline":"...","summary":"..."}[[/LEAD]]
 
 Rules for this block:
-- Only emit it ONCE per conversation, the first time you have name + (email or phone). Do not repeat it in later replies even if you learn more details.
-- Use "" (empty string) for any field you don't have — never invent a value.
-- "summary" should be one short sentence capturing what they're looking for, in your own words.
+- Include ALL fields you know so far in the conversation, not just the newest one — this block should represent the full picture to date, since it overwrites the previous record for this visitor.
+- Use "" (empty string) for any field you genuinely don't have — never invent or guess a value.
+- "summary" should be one short, current sentence capturing what they're looking for and where the conversation stands, in your own words. Update it each time you emit the block so it reflects the latest state, not just the first message.
+- Emit this block whenever you learn something new and worth recording — a name, an email, a phone number, a stated intent, a neighborhood/area, a budget figure, or a timeline. A single new fact is enough to justify emitting it again with the full updated picture.
+- Do not emit this block on a reply where nothing new was learned (e.g. the visitor only asked a follow-up question you already have full info for) — only emit when something changed.
 - This block is never shown to the visitor and must not be mentioned or referenced in your visible reply — it is a silent system record only. Write your normal conversational reply first exactly as you otherwise would, then add this block after it.
-- Do not emit this block just because someone gives their name alone, or just browses listings — only when there's real intent plus enough contact info to follow up.
 
 REALTOR KNOWLEDGE
 ${knowledge}
@@ -97,6 +101,10 @@ export async function POST(req: NextRequest) {
     const messages: ChatMessage[] = Array.isArray(body?.messages)
       ? body.messages
       : [];
+    const conversationId: string =
+      typeof body?.conversationId === "string" && body.conversationId
+        ? body.conversationId
+        : "";
 
     if (messages.length === 0) {
       return NextResponse.json(
@@ -176,20 +184,32 @@ export async function POST(req: NextRequest) {
     const { visibleText, lead } = extractLead(reply);
 
     // Fire-and-forget: don't let a slow/failed Sheets write delay or break
-    // the chat response the visitor is waiting on.
-    if (lead && (lead.name || lead.email || lead.phone)) {
+    // the chat response the visitor is waiting on. Any single tracked field
+    // is enough to justify a row — the row then evolves in place (keyed by
+    // conversationId) as more is learned over the conversation.
+    const hasAnyField =
+      lead &&
+      (lead.name ||
+        lead.email ||
+        lead.phone ||
+        lead.intent ||
+        lead.area ||
+        lead.budget ||
+        lead.timeline);
+
+    if (lead && hasAnyField && conversationId) {
       const timestamp = new Date().toISOString();
-      appendRowToSheet([
+      upsertLeadRow(conversationId, {
         timestamp,
-        lead.name,
-        lead.email,
-        lead.phone,
-        lead.intent,
-        lead.area,
-        lead.budget,
-        lead.timeline,
-        lead.summary,
-      ]).catch((err) => console.error("Lead sheet sync failed:", err));
+        name: lead.name,
+        email: lead.email,
+        phone: lead.phone,
+        intent: lead.intent,
+        area: lead.area,
+        budget: lead.budget,
+        timeline: lead.timeline,
+        summary: lead.summary,
+      }).catch((err) => console.error("Lead sheet sync failed:", err));
     }
 
     return NextResponse.json({ reply: visibleText });
