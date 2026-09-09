@@ -55,7 +55,18 @@ export default function MenuSheet({
             <Link
               key={label}
               href={href}
-              onClick={onClose}
+              onClick={() => {
+                // A deliberate click on "Book a Showing" should always pop
+                // the modal open on arrival — clear the one-time session
+                // flag right before navigating so the chat page's auto-open
+                // effect fires again, even if it already fired earlier this
+                // session. Plain back-button returns to /chat never hit
+                // this onClick, so they won't spuriously reopen the modal.
+                if (label === "Book a Showing" && typeof window !== "undefined") {
+                  sessionStorage.removeItem("mc-chat-showing-auto-opened");
+                }
+                onClose();
+              }}
               className="flex items-center gap-3.5 px-3.5 py-3.5 rounded-2xl text-navy font-medium hover:bg-pink-tint active:scale-[0.98] transition"
             >
               <span className="h-9 w-9 rounded-full bg-pink-tint flex items-center justify-center text-brand-red shrink-0">
@@ -64,7 +75,7 @@ export default function MenuSheet({
               {label}
             </Link>
           ))}
-          <a
+          
             href={`tel:${realtor.phone.replace(/[^\d+]/g, "")}`}
             onClick={onClose}
             className="flex items-center gap-3.5 px-3.5 py-3.5 rounded-2xl text-navy font-medium hover:bg-pink-tint active:scale-[0.98] transition"
