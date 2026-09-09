@@ -14,6 +14,17 @@ function uid() {
   return Math.random().toString(36).slice(2, 10);
 }
 
+function getOrCreateConversationId(): string {
+  if (typeof window === "undefined") return uid();
+  const key = "mc-chat-conversation-id";
+  let id = sessionStorage.getItem(key);
+  if (!id) {
+    id = `${Date.now()}-${uid()}`;
+    sessionStorage.setItem(key, id);
+  }
+  return id;
+}
+
 type ContentBlock =
   | { type: "text"; text: string }
   | { type: "image_url"; image_url: { url: string } };
@@ -36,6 +47,7 @@ export function useChat(initialGreeting: string) {
   const historyRef = useRef<HistoryMessage[]>([
     { role: "assistant", content: initialGreeting },
   ]);
+  const conversationIdRef = useRef<string>(getOrCreateConversationId());
 
   const sendMessage = useCallback(
     async (text: string, imageDataUrl?: string) => {
@@ -71,7 +83,10 @@ export function useChat(initialGreeting: string) {
         const res = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ messages: historyRef.current }),
+          body: JSON.stringify({
+            messages: historyRef.current,
+            conversationId: conversationIdRef.current,
+          }),
         });
 
         const data = await res.json();
