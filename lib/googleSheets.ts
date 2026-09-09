@@ -24,6 +24,34 @@ function base64url(input: Buffer | string) {
     .replace(/=+$/, "");
 }
 
+/**
+ * Retries a fetch on transient network failures (connection resets, DNS
+ * hiccups, TLS handshake drops) that occasionally happen from serverless
+ * functions reaching external hosts. Does not retry on ordinary HTTP error
+ * responses (4xx/5xx) — only on the fetch call itself throwing, since a
+ * non-ok response is usually a real error (bad auth, bad range) that
+ * retrying won't fix.
+ */
+async function fetchWithRetry(
+  url: string,
+  options: RequestInit,
+  attempts = 3
+): Promise<Response> {
+  let lastError: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fetch(url, options);
+    } catch (err) {
+      lastError = err;
+      if (i < attempts - 1) {
+        // Exponential backoff: 300ms, 900ms, ...
+        await new Promise((r) => setTimeout(r, 300 * Math.pow(3, i)));
+      }
+    }
+  }
+  throw lastError;
+}
+
 async function getAccessToken(): Promise<string | null> {
   const clientEmail = process.env.GOOGLE_SHEETS_CLIENT_EMAIL;
   const privateKeyRaw = process.env.GOOGLE_SHEETS_PRIVATE_KEY;
@@ -32,43 +60,48 @@ async function getAccessToken(): Promise<string | null> {
     return null; // Not configured — caller should no-op gracefully.
   }
 
-  const privateKey = privateKeyRaw.replace(/\\n/g, "\n");
-  const now = Math.floor(Date.now() / 1000);
+  try {
+    const privateKey = privateKeyRaw.replace(/\\n/g, "\n");
+    const now = Math.floor(Date.now() / 1000);
 
-  const header = base64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
-  const payload = base64url(
-    JSON.stringify({
-      iss: clientEmail,
-      scope: SHEETS_SCOPE,
-      aud: TOKEN_URL,
-      exp: now + 3600,
-      iat: now,
-    })
-  );
+    const header = base64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+    const payload = base64url(
+      JSON.stringify({
+        iss: clientEmail,
+        scope: SHEETS_SCOPE,
+        aud: TOKEN_URL,
+        exp: now + 3600,
+        iat: now,
+      })
+    );
 
-  const signInput = `${header}.${payload}`;
-  const signature = crypto
-    .createSign("RSA-SHA256")
-    .update(signInput)
-    .sign(privateKey);
-  const jwt = `${signInput}.${base64url(signature)}`;
+    const signInput = `${header}.${payload}`;
+    const signature = crypto
+      .createSign("RSA-SHA256")
+      .update(signInput)
+      .sign(privateKey);
+    const jwt = `${signInput}.${base64url(signature)}`;
 
-  const res = await fetch(TOKEN_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-      assertion: jwt,
-    }),
-  });
+    const res = await fetchWithRetry(TOKEN_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        assertion: jwt,
+      }),
+    });
 
-  if (!res.ok) {
-    console.error("Google Sheets auth failed:", await res.text());
+    if (!res.ok) {
+      console.error("Google Sheets auth failed:", await res.text());
+      return null;
+    }
+
+    const data = await res.json();
+    return data.access_token as string;
+  } catch (err) {
+    console.error("Google Sheets auth request failed after retries:", err);
     return null;
   }
-
-  const data = await res.json();
-  return data.access_token as string;
 }
 
 export async function appendRowToSheet(row: (string | number)[]): Promise<boolean> {
@@ -80,30 +113,35 @@ export async function appendRowToSheet(row: (string | number)[]): Promise<boolea
     return false;
   }
 
-  const accessToken = await getAccessToken();
-  if (!accessToken) {
-    console.warn("Google Sheets not configured — skipping sheet sync.");
+  try {
+    const accessToken = await getAccessToken();
+    if (!accessToken) {
+      console.warn("Google Sheets not configured — skipping sheet sync.");
+      return false;
+    }
+
+    const range = encodeURIComponent(`${sheetName}!A1`);
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}:append?valueInputOption=USER_ENTERED`;
+
+    const res = await fetchWithRetry(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ values: [row] }),
+    });
+
+    if (!res.ok) {
+      console.error("Google Sheets append failed:", await res.text());
+      return false;
+    }
+
+    return true;
+  } catch (err) {
+    console.error("Google Sheets append request failed after retries:", err);
     return false;
   }
-
-  const range = encodeURIComponent(`${sheetName}!A1`);
-  const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}:append?valueInputOption=USER_ENTERED`;
-
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ values: [row] }),
-  });
-
-  if (!res.ok) {
-    console.error("Google Sheets append failed:", await res.text());
-    return false;
-  }
-
-  return true;
 }
 
 /**
@@ -141,79 +179,84 @@ export async function upsertLeadRow(
     return false;
   }
 
-  const accessToken = await getAccessToken();
-  if (!accessToken) {
-    console.warn("Google Sheets not configured — skipping sheet sync.");
-    return false;
-  }
+  try {
+    const accessToken = await getAccessToken();
+    if (!accessToken) {
+      console.warn("Google Sheets not configured — skipping sheet sync.");
+      return false;
+    }
 
-  const values = [
-    row.timestamp,
-    row.name,
-    row.email,
-    row.phone,
-    row.intent,
-    row.area,
-    row.budget,
-    row.timeline,
-    row.summary,
-    conversationId,
-  ];
+    const values = [
+      row.timestamp,
+      row.name,
+      row.email,
+      row.phone,
+      row.intent,
+      row.area,
+      row.budget,
+      row.timeline,
+      row.summary,
+      conversationId,
+    ];
 
-  const authHeader = { Authorization: `Bearer ${accessToken}` };
+    const authHeader = { Authorization: `Bearer ${accessToken}` };
 
-  // 1. Read the ConversationId column (J) to find an existing row for this
-  //    conversation. Sheets is the source of truth here — no local cache —
-  //    so concurrent visitors never clobber each other's rows.
-  const readRange = encodeURIComponent(`${sheetName}!J:J`);
-  const readUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${readRange}`;
+    // 1. Read the ConversationId column (J) to find an existing row for this
+    //    conversation. Sheets is the source of truth here — no local cache —
+    //    so concurrent visitors never clobber each other's rows.
+    const readRange = encodeURIComponent(`${sheetName}!J:J`);
+    const readUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${readRange}`;
 
-  const readRes = await fetch(readUrl, { headers: authHeader });
-  if (!readRes.ok) {
-    console.error("Google Sheets read failed:", await readRes.text());
-    return false;
-  }
+    const readRes = await fetchWithRetry(readUrl, { headers: authHeader });
+    if (!readRes.ok) {
+      console.error("Google Sheets read failed:", await readRes.text());
+      return false;
+    }
 
-  const readData = await readRes.json();
-  const columnJ: string[][] = readData.values || [];
-  // Row 1 is the header, so data starts at index 1 (sheet row 2).
-  const existingRowIndex = columnJ.findIndex(
-    (cell, idx) => idx > 0 && cell[0] === conversationId
-  );
+    const readData = await readRes.json();
+    const columnJ: string[][] = readData.values || [];
+    // Row 1 is the header, so data starts at index 1 (sheet row 2).
+    const existingRowIndex = columnJ.findIndex(
+      (cell, idx) => idx > 0 && cell[0] === conversationId
+    );
 
-  if (existingRowIndex > 0) {
-    // Update the existing row in place (sheet rows are 1-indexed).
-    const sheetRowNumber = existingRowIndex + 1;
-    const updateRange = encodeURIComponent(`${sheetName}!A${sheetRowNumber}:J${sheetRowNumber}`);
-    const updateUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${updateRange}?valueInputOption=USER_ENTERED`;
+    if (existingRowIndex > 0) {
+      // Update the existing row in place (sheet rows are 1-indexed).
+      const sheetRowNumber = existingRowIndex + 1;
+      const updateRange = encodeURIComponent(`${sheetName}!A${sheetRowNumber}:J${sheetRowNumber}`);
+      const updateUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${updateRange}?valueInputOption=USER_ENTERED`;
 
-    const updateRes = await fetch(updateUrl, {
-      method: "PUT",
+      const updateRes = await fetchWithRetry(updateUrl, {
+        method: "PUT",
+        headers: { ...authHeader, "Content-Type": "application/json" },
+        body: JSON.stringify({ values: [values] }),
+      });
+
+      if (!updateRes.ok) {
+        console.error("Google Sheets update failed:", await updateRes.text());
+        return false;
+      }
+      return true;
+    }
+
+    // No existing row for this conversation yet — append a new one.
+    const appendRange = encodeURIComponent(`${sheetName}!A1`);
+    const appendUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${appendRange}:append?valueInputOption=USER_ENTERED`;
+
+    const appendRes = await fetchWithRetry(appendUrl, {
+      method: "POST",
       headers: { ...authHeader, "Content-Type": "application/json" },
       body: JSON.stringify({ values: [values] }),
     });
 
-    if (!updateRes.ok) {
-      console.error("Google Sheets update failed:", await updateRes.text());
+    if (!appendRes.ok) {
+      console.error("Google Sheets append failed:", await appendRes.text());
       return false;
     }
+
     return true;
-  }
-
-  // No existing row for this conversation yet — append a new one.
-  const appendRange = encodeURIComponent(`${sheetName}!A1`);
-  const appendUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${appendRange}:append?valueInputOption=USER_ENTERED`;
-
-  const appendRes = await fetch(appendUrl, {
-    method: "POST",
-    headers: { ...authHeader, "Content-Type": "application/json" },
-    body: JSON.stringify({ values: [values] }),
-  });
-
-  if (!appendRes.ok) {
-    console.error("Google Sheets append failed:", await appendRes.text());
+  } catch (err) {
+    console.error("Google Sheets upsert request failed after retries:", err);
     return false;
   }
-
-  return true;
 }
